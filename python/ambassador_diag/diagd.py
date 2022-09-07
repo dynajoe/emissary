@@ -488,13 +488,13 @@ class DiagApp (Flask):
             result = False
             self.logger.error("CACHE: IR MISMATCH")
             errors += "IR diffs:\n"
-            errors += self.json_diff("IR", i1, i2)
+            #errors += self.json_diff("IR", i1, i2)
 
         if e1 != e2:
             result = False
             self.logger.error("CACHE: ENVOY CONFIG MISMATCH")
             errors += "econf diffs:\n"
-            errors += self.json_diff("econf", i1, i2)
+            #errors += self.json_diff("econf", i1, i2)
 
         if not result:
             err_path = os.path.join(self.snapshot_path, "diff-tmp.txt")
