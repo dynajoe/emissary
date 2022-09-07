@@ -703,36 +703,41 @@ class V3Listener(dict):
 
         logger = self.config.ir.logger
 
-        # Below, we're going to do the moral equivalent of joining two tables. Like so:
-        #
-        # foreach chain:
-        #   foreach route_variant:
-        #      foreach chain.matching_hosts(rv.route):
-        #         // make envoy configs
-        #
-        # def chain.matching_hosts(route):
-        #   // does any host in this chain match any host-glob in the route?
-        #
-        # The algorithm above is O(chains * route_variants).
-        #
-        # Our route_variants always use basic hostnames, not globs (no *s). This means we can index
-        # the route_variants to go from O(c*r) time to O(c+r)
+        # gate the route variant join optimization
+        use_route_index = environ.get("X_FAST_COMPUTE_ROUTES", 'false').lower() in ('true', '1')
+
         index = {}
-        for rv in self.config.route_variants:
-            group = rv.route._group
+        if use_route_index:
+            # Below, we're going to do the moral equivalent of joining two tables. Like so:
+            #
+            # foreach chain:
+            #   foreach route_variant:
+            #      foreach chain.matching_hosts(rv.route):
+            #         // make envoy configs
+            #
+            # def chain.matching_hosts(route):
+            #   // does any host in this chain match any host-glob in the route?
+            #
+            # The algorithm above is O(chains * route_variants).
+            #
+            # Our route_variants always use basic hostnames, not globs (no *s). This means we can index
+            # the route_variants to go from O(c*r) time to O(c+r)
 
-            host_redirect = (group.get('host_redirect') or {}).get('host')
-            if host_redirect:
-                raise Exception(f'We expect host_redirect to never be set: {rv}')
-            group_glob = group.get('host')
-            if not group_glob:
-                raise Exception(f'We expect host to always be set: {rv}')
+            for rv in self.config.route_variants:
+                group = rv.route._group
 
-            key = group_glob
-            if key not in index:
-                index[key] = []
+                host_redirect = (group.get('host_redirect') or {}).get('host')
+                if host_redirect:
+                    raise Exception(f'We expect host_redirect to never be set: {rv}')
+                group_glob = group.get('host')
+                if not group_glob:
+                    raise Exception(f'We expect host to always be set: {rv}')
 
-            index[key].append(rv)
+                key = group_glob
+                if key not in index:
+                    index[key] = []
+
+                index[key].append(rv)
 
         for chain_key, chain in self._chains.items():
             # Only look at HTTP(S) chains.
@@ -745,12 +750,14 @@ class V3Listener(dict):
             # Remember whether we found an ACME route.
             found_acme = False
 
-            # consult the index
-            rvs = []
-            for host in chain.hosts.values():
-                key = host.hostname
-                if key in index:
-                    rvs.extend(index[key])
+            rvs = self.config.route_variants
+            if use_route_index:
+                # consult the index
+                rvs = []
+                for host in chain.hosts.values():
+                    key = host.hostname
+                    if key in index:
+                        rvs.extend(index[key])
 
             # The data structure we're walking here is config.route_variants rather than
             # config.routes. There's a one-to-one correspondence between the two, but we use the
