@@ -3,7 +3,11 @@ package ambex
 import (
 	// standard library
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	// third-party libraries
 	"google.golang.org/protobuf/proto"
@@ -181,7 +185,19 @@ func ListenerToRdsListener(lnr *apiv2.Listener) (*apiv2.Listener, []*apiv2.Route
 // V3ListenerToRdsListener is the v3 variety of ListnerToRdsListener
 func V3ListenerToRdsListener(lnr *apiv3_listener.Listener) (*apiv3_listener.Listener, []*apiv3_route.RouteConfiguration, error) {
 	l := proto.Clone(lnr).(*apiv3_listener.Listener)
+
 	var routes []*apiv3_route.RouteConfiguration
+
+	// Skip this modification because it results in Unimplemented errors when mappings are added/removed
+	if os.Getenv("TEMPORAL_SKIP_AMBEX_ROUTE_TRANSFORM") == "true" {
+		return l, routes, nil
+	}
+
+	useFilterChainKey := os.Getenv("TEMPORAL_USE_AMBEX_FILTER_CHAIN_KEY") == "true"
+
+	// To handle collisions keep track of number of filter chain matches that hash to the same key
+	matchKeyIndex := make(map[string]int)
+
 	for _, fc := range l.FilterChains {
 		for _, f := range fc.Filters {
 			if f.Name != ecp_wellknown.HTTPConnectionManager {
@@ -200,12 +216,32 @@ func V3ListenerToRdsListener(lnr *apiv3_listener.Listener) (*apiv3_listener.List
 				if ok {
 					rc := rs.RouteConfig
 					if rc.Name == "" {
-						// Generate a unique name for the RouteConfiguration that we can use to
-						// correlate the listener to the RDS record. We use the listener name plus
-						// an index because there can be more than one route configuration
-						// associated with a given listener.
-						rc.Name = fmt.Sprintf("%s-routeconfig-%d", l.Name, len(routes))
+						if useFilterChainKey {
+							// Generate a unique route key from the filter chain match:
+							// e.g.
+							// {
+							//   "server_names": [
+							//     "acme.corp.cloud"
+							//   ],
+							//   "transport_protocol": "tls"
+							// }
+							filterChainMatch, _ := json.Marshal(fc.GetFilterChainMatch())
+							matchHash := md5.Sum(filterChainMatch)
+							matchKey := hex.EncodeToString(matchHash[:])
+
+							rc.Name = fmt.Sprintf("%s-routeconfig-%s-%d", l.Name, matchKey, matchKeyIndex[matchKey])
+
+							// Add or update map entry for this filter chain key to dedupe those that hash to the same key
+							matchKeyIndex[matchKey]++
+						} else {
+							// Generate a unique name for the RouteConfiguration that we can use to
+							// correlate the listener to the RDS record. We use the listener name plus
+							// an index because there can be more than one route configuration
+							// associated with a given listener.
+							rc.Name = fmt.Sprintf("%s-routeconfig-%d", l.Name, len(routes))
+						}
 					}
+
 					routes = append(routes, rc)
 					// Now that we have extracted and named the RouteConfiguration, we change the
 					// RouteSpecifier from the inline RouteConfig variation to RDS via ADS. This
